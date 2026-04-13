@@ -1,0 +1,123 @@
+stages:
+  - setup
+  - test
+
+variables:
+  ACCOUNT: "hpc-prf-cifi"
+  XILINX_EXCLUDE_NODES: "n2fpga02,n2fpga12,n2fpga16"
+  BITTWARE_EXCLUDE_NODES: "n2fpga20,n2fpga22,n2fpga23,n2fpga26"
+
+default:
+  id_tokens:
+    CI_JOB_JWT:
+      aud: https://git.uni-paderborn.de
+  tags:
+    - slurm
+  before_script:
+    - source env.sh
+    - source .venv/bin/activate
+
+# ==========================================================================
+# Setup — create the venv once and pass it to all tests via artifacts
+# ==========================================================================
+
+setup:venv:
+  stage: setup
+  variables:
+    SCHEDULER_PARAMETERS: "-A ${ACCOUNT} -p normal -t 00:10:00 -n 1"
+  before_script:
+    - source env.sh
+  script:
+    - make venv
+  artifacts:
+    paths:
+      - .venv
+
+# ==========================================================================
+# Xilinx U280 tests (3 FPGAs per node, 2 channels each)
+# ==========================================================================
+
+.xilinx_test:
+  stage: test
+  parallel:
+    matrix:
+      - XRT_VER: ["2.14", "2.15", "2.16"]
+  variables:
+    SCHEDULER_PARAMETERS: >-
+      -A ${ACCOUNT} -p fpga
+      --constraint="xilinx_u280_xrt${XRT_VER}"
+      -x ${XILINX_EXCLUDE_NODES}
+      -t 01:00:00 -N 1
+  needs: [setup:venv]
+
+test:xilinx:loopback:
+  extends: .xilinx_test
+  script:
+    - source xilinx_env.sh $XRT_VER
+    - eval "$(topomux -f topologies/xilinx_loopback.topo -b hardware --fpgas-per-node 3)"
+    - sleep 60
+    - linktest -p /opt/software/FPGA/aurora-linktest/$XRT_VER/aurora_flow_test_hw.xclbin -m 0 -f 128 -i 100 -l
+
+test:xilinx:pair:
+  extends: .xilinx_test
+  script:
+    - source xilinx_env.sh $XRT_VER
+    - eval "$(topomux -f topologies/xilinx_pair.topo -b hardware --fpgas-per-node 3)"
+    - sleep 60
+    - linktest -p /opt/software/FPGA/aurora-linktest/$XRT_VER/aurora_flow_test_hw.xclbin -m 1 -f 128 -i 100 -l
+
+test:xilinx:ring:
+  extends: .xilinx_test
+  script:
+    - source xilinx_env.sh $XRT_VER
+    - eval "$(topomux -f topologies/xilinx_ring.topo -b hardware --fpgas-per-node 3)"
+    - sleep 60
+    - linktest -p /opt/software/FPGA/aurora-linktest/$XRT_VER/aurora_flow_test_hw.xclbin -m 2 -f 128 -i 100 -l
+
+# ==========================================================================
+# Bittware 520N tests (2 FPGAs per node, 4 channels each)
+# ==========================================================================
+
+.bittware_test:
+  stage: test
+  variables:
+    SCHEDULER_PARAMETERS: >-
+      -A ${ACCOUNT} -p fpga
+      --constraint="bittware_520n_20.4.0_max"
+      -x ${BITTWARE_EXCLUDE_NODES}
+      -t 00:30:00 -N 1
+  needs: [setup:venv]
+
+test:bittware:loopback:
+  extends: .bittware_test
+  script:
+    - source bittware_env.sh
+    - eval "$(topomux -f topologies/bittware_loopback.topo -b hardware --fpgas-per-node 2 --command changeFPGAlinks)"
+    - sleep 60
+    - testFPGAlinks_throughput_nodes_1_cards_1 -m 3 -d 0
+    - testFPGAlinks_throughput_nodes_1_cards_1 -m 3 -d 1
+
+test:bittware:pair:
+  extends: .bittware_test
+  script:
+    - source bittware_env.sh
+    - eval "$(topomux -f topologies/bittware_pair.topo -b hardware --fpgas-per-node 2 --command changeFPGAlinks)"
+    - sleep 60
+    - testFPGAlinks_throughput_nodes_1_cards_2 -m 0
+
+test:bittware:adjacent:
+  extends: .bittware_test
+  script:
+    - source bittware_env.sh
+    - eval "$(topomux -f topologies/bittware_adjacent.topo -b hardware --fpgas-per-node 2 --command changeFPGAlinks)"
+    - sleep 60
+    - testFPGAlinks_throughput_nodes_1_cards_2 -m 1
+
+test:bittware:different:
+  extends: .bittware_test
+  script:
+    - source bittware_env.sh
+    - eval "$(topomux -f topologies/bittware_different.topo -b hardware --fpgas-per-node 2 --command changeFPGAlinks)"
+    - sleep 60
+    - testFPGAlinks_throughput_nodes_1_cards_1 -m 0 -d 0
+    - testFPGAlinks_throughput_nodes_1_cards_1 -m 1 -d 1

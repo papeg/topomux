@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "topomux"
+version = "0.1.0"
+description = "FPGA network topology generator"
+requires-python = ">=3.10"
+dependencies = [
+    "networkx>=3.0",
+]
+
+[project.scripts]
+topomux = "topomux.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
