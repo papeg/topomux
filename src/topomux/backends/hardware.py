@@ -25,7 +25,9 @@ class NodeMapping:
 
 
 class HardwareBackend:
-    """Generates --fpgalink=... strings for changeFPGAlinksXilinx."""
+    """Generates --fpgalink=... strings for any toolchain that consumes the
+    Xilinx / oneAPI fpgalink syntax. Callers prepend their own tool name
+    (changeFPGAlinks, changeFPGAlinksXilinx, ...)."""
 
     def __init__(self, mapping: NodeMapping | None = None):
         self.mapping = mapping or NodeMapping()
@@ -34,18 +36,11 @@ class HardwareBackend:
         """Return list of --fpgalink=... strings, one per edge."""
         validate(graph)
         links: list[str] = []
-        for (r1, ch1), (r2, ch2) in graph.edges:
-            src = f"{self.mapping.format(r1)}:ch{ch1}"
-            dst = f"{self.mapping.format(r2)}:ch{ch2}"
+        for (r1, l1), (r2, l2) in graph.edges:
+            src = f"{self.mapping.format(r1)}:ch{l1}"
+            dst = f"{self.mapping.format(r2)}:ch{l2}"
             links.append(f"--fpgalink={src}-{dst}")
         return links
-
-    def emit_command(
-        self, graph: nx.Graph, cmd: str = "changeFPGAlinksXilinx"
-    ) -> str:
-        """Return complete command string."""
-        links = self.emit(graph)
-        return f"{cmd} {' '.join(links)}"
 
     def emit_gui_url(self, graph: nx.Graph) -> str:
         """Return fpgalink-gui URL for visualization."""

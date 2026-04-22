@@ -1,8 +1,22 @@
 # topomux
 
-FPGA network topology generator built on NetworkX. Defines topologies once, emits them as hardware `--fpgalink` commands or emulation FIFOs/symlinks.
+FPGA network topology generator built on NetworkX. Defines topologies once, emits them as either hardware `--fpgalink` commands or emulation FIFOs + symlinks on the filesystem.
+
+The graph's nodes are `(rank, link)` tuples, the filesystem layout is `rank{R}/link_i{L}_{tx,rx}`, and the hardware backend emits `--fpgalink=...` strings. Every link is bidirectional at the filesystem level (always has a `_tx` FIFO + an `_rx` symlink wired by the graph edges).
 
 ## Install
+
+With `uv`:
+
+```bash
+uv venv --python 3.14
+source .venv/bin/activate
+uv pip install git+https://github.com/papeg/topomux
+# or editable from a local checkout:
+uv pip install -e /path/to/topomux
+```
+
+Or the repo's own `make` using traditional venv:
 
 ```bash
 source env.sh
@@ -12,18 +26,31 @@ source .venv/bin/activate
 
 ## CLI
 
+Four topologies ship:
+
+| Name           | Edge |
+|----------------|------|
+| `ring`         | `(r, 1) <-> ((r+1) % n, 0)` |
+| `reverse-ring` | `(r, 0) <-> ((r+1) % n, 1)` |
+| `loopback`     | `(r, L) <-> (r, L)` for each rank and link |
+| `pair`         | `(r, 0) <-> (r, 1)` within each rank |
+
 ```bash
-# Hardware links (Xilinx, 3 FPGAs per node)
-topomux ring 3 --backend hardware --fpgas-per-node 3
-# → changeFPGAlinksXilinx --fpgalink=n00:acl0:ch1-n00:acl1:ch0 ...
+# Hardware: emits --fpgalink=... flags on stdout, space-separated.
+# Prepend the toolchain's link tool:
+changeFPGAlinks       $(topomux ring 2 -b hardware --fpgas-per-node 2)
+changeFPGAlinksXilinx $(topomux ring 3 -b hardware --fpgas-per-node 3)
 
 # From topology file
 topomux -f topologies/xilinx_ring.topo -b hardware --fpgas-per-node 3
 
-# Emulation links
-topomux ring 4 -b emulation --naming auroraflow --base-dir /tmp/pipes
+# Emulation FIFOs + symlinks (plain layout)
+topomux ring 4 -b emulation --base-dir /tmp/pipes
 
-# Dry run (print without creating)
+# Emulation with a BSP overlay (adds symlinks according BSP's id layout)
+topomux reverse-ring 4 -b emulation --bsp <name> --base-dir /tmp/pipes
+
+# Dry run (print actions without creating files)
 topomux ring 4 -b emulation --dry-run
 
 # FPGA-Link GUI URL
@@ -35,16 +62,16 @@ topomux ring 3 -b hardware --gui-url
 ```python
 import topomux
 
-# Standard topologies
-g = topomux.ring(4)                       # AuroraFlow convention (ch1→next ch0)
-g = topomux.ring(4, channels=(0, 1))      # p2p_fpga convention (ch0→next ch1)
-g = topomux.loopback(3, channels_per_rank=2)
+# Standard topologies - pick direction by function name
+g = topomux.ring(4)
+g = topomux.reverse_ring(4)
+g = topomux.loopback(3, links_per_rank=2)
 g = topomux.pair(3)
 
 # From file
-g = topomux.from_file("topologies/xilinx_ring.topo")
+g = topomux.from_file("topologies/some.topo")
 
-# Arbitrary
+# Arbitrary edges
 g = topomux.from_edge_list([
     ((0, 0), (1, 1)),
     ((1, 0), (2, 1)),
@@ -56,9 +83,16 @@ hw = topomux.HardwareBackend(topomux.NodeMapping(fpgas_per_node=3))
 print(hw.emit_command(g))
 print(hw.emit_gui_url(g))
 
-# Emulation output
-emu = topomux.EmulationBackend(topomux.AuroraFlowNaming(), base_dir="/tmp/pipes")
+# Emulation output (plain)
+emu = topomux.EmulationBackend(base_dir="/tmp/pipes")
 emu.emit(g, dry_run=True)
+
+# Emulation output (with BSP overlay)
+emu = topomux.EmulationBackend(
+    base_dir="/tmp/pipes",
+    bsp=topomux.BittwareS10BSP(),
+)
+emu.emit(g)
 ```
 
 ## Topology File Format
@@ -68,13 +102,48 @@ emu.emit(g, dry_run=True)
 ```
 # Shorthand
 ring 4
+reverse-ring 4
+loopback 3 4        # 3 ranks, 4 links per rank
+pair 3
 
-# Explicit edges: rank.channel - rank.channel
+# Explicit edges: rank.link - rank.link
 0.0 - 1.1
 2.0 - 0.1
-
-# Shorthand with channel override
-ring 4 0 1
-loopback 3 4
-pair 3 0 1
 ```
+
+## Emulation layout
+
+For every `(rank, link)` node the graph uses, the emulation backend creates:
+
+```
+{base_dir}/rank{R}/link_i{L}_tx    FIFO
+{base_dir}/rank{R}/link_i{L}_rx    symlink wired by the graph edges
+```
+
+## BSP overlay
+
+Intel BSPs IO-pipes are expecting a file in the process's cwd named after the id matching the number in the `board_spec.xml`.
+
+For these runtimes, topomux emits an additional *fd-number* symlink layer via `--bsp`. For every `(rank, link)` node in the graph:
+
+```
+{base_dir}/rank{R}/{bsp.output_id(L)} -> link_i{L}_tx
+{base_dir}/rank{R}/{bsp.input_id (L)} -> link_i{L}_rx
+```
+
+A `BSP` describes *pure board layout*: `input_id(link)` and `output_id(link)` return the ids the hardware platform assigns to each link direction.
+
+### Shipped BSPs
+
+`bittware_s10` (Bittware 520N, Stratix 10 p520_max_sg280l). The BSP lists 4 bidirectional channels in `board_spec.xml` with the id assignments that fall out of the chan_id positions:
+
+```python
+class BittwareS10BSP(BSP):
+    name = "bittware_s10"
+
+    def input_id(self, link):  return 2 * link        # kernel_input_chL  = id 2L
+    def output_id(self, link): return 2 * link + 1    # kernel_output_chL = id 2L+1
+    def num_links(self):       return 4
+```
+
+Then `topomux <topology> N --bsp bittware_s10` works end-to-end.

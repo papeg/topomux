@@ -5,40 +5,61 @@ from pathlib import Path
 
 import networkx as nx
 
-from topomux.topologies import ranks, validate
+from topomux.topologies import links as links_of, ranks, validate
 
 
-class AuroraFlowNaming:
-    """Flat directory naming: aurora_r{rank}_i{ch}_tx / _rx."""
+class LinkNaming:
+    """Per-rank directory layout: rank{R}/link_i{L}_{tx,rx}."""
 
-    def tx_path(self, base_dir: Path, rank: int, channel: int) -> Path:
-        return base_dir / f"aurora_r{rank}_i{channel}_tx"
+    def rank_dir(self, base_dir: Path, rank: int) -> Path:
+        return base_dir / f"rank{rank}"
 
-    def rx_path(self, base_dir: Path, rank: int, channel: int) -> Path:
-        return base_dir / f"aurora_r{rank}_i{channel}_rx"
+    def tx_path(self, base_dir: Path, rank: int, link: int) -> Path:
+        return self.rank_dir(base_dir, rank) / f"link_i{link}_tx"
 
-    def directories(self, base_dir: Path, rank_ids: list[int]) -> list[Path]:
-        return [base_dir]
-
-
-class P2pFpgaNaming:
-    """Per-rank directory naming: rank{i}/channel_{c} with numbered symlinks."""
-
-    def tx_path(self, base_dir: Path, rank: int, channel: int) -> Path:
-        return base_dir / f"rank{rank}" / f"channel_{channel}"
-
-    def rx_path(self, base_dir: Path, rank: int, channel: int) -> Path:
-        link_num = channel * 2 + 2
-        return base_dir / f"rank{rank}" / str(link_num)
-
-    def local_rx_path(
-        self, base_dir: Path, rank: int, channel: int
-    ) -> Path:
-        link_num = channel * 2 + 1
-        return base_dir / f"rank{rank}" / str(link_num)
+    def rx_path(self, base_dir: Path, rank: int, link: int) -> Path:
+        return self.rank_dir(base_dir, rank) / f"link_i{link}_rx"
 
     def directories(self, base_dir: Path, rank_ids: list[int]) -> list[Path]:
-        return [base_dir / f"rank{r}" for r in rank_ids]
+        return [self.rank_dir(base_dir, r) for r in rank_ids]
+
+
+class BSP:
+    """Maps a link index to the fd id a kernel IO-pipe struct declares."""
+
+    name: str = "abstract"
+
+    def input_id(self, link: int) -> int:
+        raise NotImplementedError
+
+    def output_id(self, link: int) -> int:
+        raise NotImplementedError
+
+    def num_links(self) -> int:
+        raise NotImplementedError
+
+
+class BittwareS10BSP(BSP):
+    """bittware_s10 / 520N. chan_id positions in board_spec.xml:
+        2L   -> kernel_input_chL   (id = 2L)
+        2L+1 -> kernel_output_chL  (id = 2L+1)
+    """
+
+    name = "bittware_s10"
+
+    def input_id(self, link: int) -> int:
+        return 2 * link
+
+    def output_id(self, link: int) -> int:
+        return 2 * link + 1
+
+    def num_links(self) -> int:
+        return 4
+
+
+BSP_REGISTRY: dict[str, type[BSP]] = {
+    "bittware_s10": BittwareS10BSP,
+}
 
 
 def _symlink_target(target: Path, link: Path) -> str:
@@ -53,14 +74,16 @@ class EmulationBackend:
 
     def __init__(
         self,
-        naming: AuroraFlowNaming | P2pFpgaNaming,
         base_dir: Path,
+        naming: LinkNaming | None = None,
+        bsp: BSP | None = None,
     ):
-        self.naming = naming
+        self.naming = naming or LinkNaming()
         self.base_dir = Path(base_dir)
+        self.bsp = bsp
 
     def emit(self, graph: nx.Graph, dry_run: bool = False) -> list[str]:
-        """Create FIFOs and symlinks. Returns list of actions taken."""
+        """Create the per-rank dirs, FIFOs, and symlinks. Returns the actions."""
         validate(graph)
         actions: list[str] = []
         rank_ids = ranks(graph)
@@ -72,44 +95,23 @@ class EmulationBackend:
 
         created_fifos: set[Path] = set()
 
-        # For P2pFpgaNaming, create local odd-numbered symlinks
-        if isinstance(self.naming, P2pFpgaNaming):
-            all_channels: dict[int, set[int]] = {}
-            for r, ch in graph.nodes:
-                all_channels.setdefault(r, set()).add(ch)
-            for r, chs in sorted(all_channels.items()):
-                for ch in sorted(chs):
-                    fifo = self.naming.tx_path(self.base_dir, r, ch)
-                    if fifo not in created_fifos:
-                        actions.append(f"mkfifo {fifo}")
-                        if not dry_run:
-                            os.mkfifo(fifo)
-                        created_fifos.add(fifo)
-                    local_rx = self.naming.local_rx_path(self.base_dir, r, ch)
-                    target = _symlink_target(fifo, local_rx)
-                    actions.append(f"ln -s {target} {local_rx}")
-                    if not dry_run:
-                        local_rx.symlink_to(target)
-
-        for (r_a, ch_a), (r_b, ch_b) in graph.edges:
-            is_self_loop = (r_a, ch_a) == (r_b, ch_b)
-
-            tx_a = self.naming.tx_path(self.base_dir, r_a, ch_a)
-            if tx_a not in created_fifos:
-                actions.append(f"mkfifo {tx_a}")
+        def _ensure_tx_fifo(rank: int, link: int) -> Path:
+            tx = self.naming.tx_path(self.base_dir, rank, link)
+            if tx not in created_fifos:
+                actions.append(f"mkfifo {tx}")
                 if not dry_run:
-                    os.mkfifo(tx_a)
-                created_fifos.add(tx_a)
+                    os.mkfifo(tx)
+                created_fifos.add(tx)
+            return tx
 
+        for (r_a, l_a), (r_b, l_b) in graph.edges:
+            is_self_loop = (r_a, l_a) == (r_b, l_b)
+
+            tx_a = _ensure_tx_fifo(r_a, l_a)
             if not is_self_loop:
-                tx_b = self.naming.tx_path(self.base_dir, r_b, ch_b)
-                if tx_b not in created_fifos:
-                    actions.append(f"mkfifo {tx_b}")
-                    if not dry_run:
-                        os.mkfifo(tx_b)
-                    created_fifos.add(tx_b)
+                tx_b = _ensure_tx_fifo(r_b, l_b)
 
-            rx_a = self.naming.rx_path(self.base_dir, r_a, ch_a)
+            rx_a = self.naming.rx_path(self.base_dir, r_a, l_a)
             if is_self_loop:
                 target = _symlink_target(tx_a, rx_a)
                 actions.append(f"ln -s {target} {rx_a}")
@@ -121,10 +123,26 @@ class EmulationBackend:
                 if not dry_run:
                     rx_a.symlink_to(target_a)
 
-                rx_b = self.naming.rx_path(self.base_dir, r_b, ch_b)
+                rx_b = self.naming.rx_path(self.base_dir, r_b, l_b)
                 target_b = _symlink_target(tx_a, rx_b)
                 actions.append(f"ln -s {target_b} {rx_b}")
                 if not dry_run:
                     rx_b.symlink_to(target_b)
+
+        if self.bsp is not None:
+            for rank in rank_ids:
+                for link in links_of(graph, rank):
+                    tx = self.naming.tx_path(self.base_dir, rank, link)
+                    rx = self.naming.rx_path(self.base_dir, rank, link)
+                    rank_dir = self.naming.rank_dir(self.base_dir, rank)
+
+                    tx_fd = rank_dir / str(self.bsp.output_id(link))
+                    rx_fd = rank_dir / str(self.bsp.input_id(link))
+
+                    actions.append(f"ln -s {tx.name} {tx_fd}")
+                    actions.append(f"ln -s {rx.name} {rx_fd}")
+                    if not dry_run:
+                        tx_fd.symlink_to(tx.name)
+                        rx_fd.symlink_to(rx.name)
 
         return actions

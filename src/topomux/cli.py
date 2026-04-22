@@ -5,22 +5,14 @@ import sys
 from pathlib import Path
 
 from topomux import topologies
-from topomux.backends.emulation import (
-    AuroraFlowNaming,
-    EmulationBackend,
-    P2pFpgaNaming,
-)
+from topomux.backends.emulation import BSP_REGISTRY, EmulationBackend
 from topomux.backends.hardware import HardwareBackend, NodeMapping
 
 TOPOLOGIES = {
     "ring": topologies.ring,
+    "reverse-ring": topologies.reverse_ring,
     "loopback": topologies.loopback,
     "pair": topologies.pair,
-}
-
-NAMING_CONVENTIONS = {
-    "auroraflow": AuroraFlowNaming,
-    "p2p_fpga": P2pFpgaNaming,
 }
 
 
@@ -53,16 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--channels",
-        type=str,
-        default=None,
-        help="Channel pair override, e.g. '0,1'",
-    )
-    parser.add_argument(
-        "--channels-per-rank",
+        "--links-per-rank",
         type=int,
         default=2,
-        help="Channels per rank for loopback (default: 2)",
+        help="Links per rank for loopback (default: 2)",
     )
 
     parser.add_argument(
@@ -74,10 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Emulation options
     parser.add_argument(
-        "--naming",
-        choices=list(NAMING_CONVENTIONS.keys()),
-        default="auroraflow",
-        help="Naming convention for emulation (default: auroraflow)",
+        "--bsp",
+        choices=list(BSP_REGISTRY.keys()),
+        default=None,
+        help="Add fd-number symlinks per this BSP's id layout",
     )
     parser.add_argument(
         "--base-dir",
@@ -103,12 +89,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print fpgalink-gui URL",
     )
-    parser.add_argument(
-        "--command",
-        type=str,
-        default="changeFPGAlinksXilinx",
-        help="Hardware link tool command (default: changeFPGAlinksXilinx)",
-    )
 
     return parser
 
@@ -129,11 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.topology == "loopback":
             graph = topo_fn(
                 args.num_ranks,
-                channels_per_rank=args.channels_per_rank,
+                links_per_rank=args.links_per_rank,
             )
-        elif args.channels:
-            ch_a, ch_b = (int(x) for x in args.channels.split(","))
-            graph = topo_fn(args.num_ranks, channels=(ch_a, ch_b))
         else:
             graph = topo_fn(args.num_ranks)
 
@@ -144,11 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.gui_url:
             print(backend.emit_gui_url(graph))
         else:
-            print(backend.emit_command(graph, cmd=args.command))
+            print(" ".join(backend.emit(graph)))
 
     elif args.backend == "emulation":
-        naming = NAMING_CONVENTIONS[args.naming]()
-        backend = EmulationBackend(naming=naming, base_dir=args.base_dir)
+        bsp = BSP_REGISTRY[args.bsp]() if args.bsp else None
+        backend = EmulationBackend(base_dir=args.base_dir, bsp=bsp)
         actions = backend.emit(graph, dry_run=args.dry_run)
         for action in actions:
             print(action)

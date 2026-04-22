@@ -1,32 +1,38 @@
 from topomux.topologies import (
     ring,
+    reverse_ring,
     loopback,
     pair,
     from_edge_list,
     from_file,
     ranks,
-    channels,
+    links,
     validate,
 )
 from topomux.backends.hardware import HardwareBackend, NodeMapping
 from topomux.backends.emulation import (
+    BSP,
+    BittwareS10BSP,
+    BSP_REGISTRY,
     EmulationBackend,
-    AuroraFlowNaming,
-    P2pFpgaNaming,
+    LinkNaming,
 )
 
 __all__ = [
     "ring",
+    "reverse_ring",
     "loopback",
     "pair",
     "from_edge_list",
     "from_file",
     "ranks",
-    "channels",
+    "links",
     "validate",
     "HardwareBackend",
     "NodeMapping",
+    "BSP",
+    "BittwareS10BSP",
+    "BSP_REGISTRY",
     "EmulationBackend",
-    "AuroraFlowNaming",
-    "P2pFpgaNaming",
+    "LinkNaming",
 ]
