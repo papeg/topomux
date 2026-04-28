@@ -70,7 +70,9 @@ def _symlink_target(target: Path, link: Path) -> str:
 
 
 class EmulationBackend:
-    """Creates unix FIFOs and symlinks for software emulation."""
+    """Emit shell commands that set up unix FIFOs and symlinks for software
+    emulation. Pure: never touches the filesystem. Caller pipes stdout to
+    `bash` to actually create the files."""
 
     def __init__(
         self,
@@ -82,16 +84,14 @@ class EmulationBackend:
         self.base_dir = Path(base_dir)
         self.bsp = bsp
 
-    def emit(self, graph: nx.Graph, dry_run: bool = False) -> list[str]:
-        """Create the per-rank dirs, FIFOs, and symlinks. Returns the actions."""
+    def emit(self, graph: nx.Graph) -> list[str]:
+        """Return the mkdir/mkfifo/ln-s shell commands for the graph."""
         validate(graph)
         actions: list[str] = []
         rank_ids = ranks(graph)
 
         for d in self.naming.directories(self.base_dir, rank_ids):
             actions.append(f"mkdir -p {d}")
-            if not dry_run:
-                d.mkdir(parents=True, exist_ok=True)
 
         created_fifos: set[Path] = set()
 
@@ -99,8 +99,6 @@ class EmulationBackend:
             tx = self.naming.tx_path(self.base_dir, rank, link)
             if tx not in created_fifos:
                 actions.append(f"mkfifo {tx}")
-                if not dry_run:
-                    os.mkfifo(tx)
                 created_fifos.add(tx)
             return tx
 
@@ -115,19 +113,13 @@ class EmulationBackend:
             if is_self_loop:
                 target = _symlink_target(tx_a, rx_a)
                 actions.append(f"ln -s {target} {rx_a}")
-                if not dry_run:
-                    rx_a.symlink_to(target)
             else:
                 target_a = _symlink_target(tx_b, rx_a)
                 actions.append(f"ln -s {target_a} {rx_a}")
-                if not dry_run:
-                    rx_a.symlink_to(target_a)
 
                 rx_b = self.naming.rx_path(self.base_dir, r_b, l_b)
                 target_b = _symlink_target(tx_a, rx_b)
                 actions.append(f"ln -s {target_b} {rx_b}")
-                if not dry_run:
-                    rx_b.symlink_to(target_b)
 
         if self.bsp is not None:
             for rank in rank_ids:
@@ -141,8 +133,5 @@ class EmulationBackend:
 
                     actions.append(f"ln -s {tx.name} {tx_fd}")
                     actions.append(f"ln -s {rx.name} {rx_fd}")
-                    if not dry_run:
-                        tx_fd.symlink_to(tx.name)
-                        rx_fd.symlink_to(rx.name)
 
         return actions

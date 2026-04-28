@@ -1,8 +1,8 @@
 # topomux
 
-FPGA network topology generator built on NetworkX. Defines topologies once, emits them as either hardware `--fpgalink` commands or emulation FIFOs + symlinks on the filesystem.
+FPGA network topology generator built on NetworkX. Defines topologies once, emits shell commands for either hardware (`--fpgalink=...` strings) or emulation (`mkdir`/`mkfifo`/`ln -s` strings). Both backends are pure: they print to stdout and never touch the filesystem. Pipe to `bash` to apply.
 
-The graph's nodes are `(rank, link)` tuples, the filesystem layout is `rank{R}/link_i{L}_{tx,rx}`, and the hardware backend emits `--fpgalink=...` strings. Every link is bidirectional at the filesystem level (always has a `_tx` FIFO + an `_rx` symlink wired by the graph edges).
+The graph's nodes are `(rank, link)` tuples, the emulation filesystem layout is `rank{R}/link_i{L}_{tx,rx}`, and the hardware backend emits `--fpgalink=...` strings. Every link is bidirectional at the filesystem level (always has a `_tx` FIFO + an `_rx` symlink wired by the graph edges).
 
 ## Install
 
@@ -44,14 +44,12 @@ changeFPGAlinksXilinx $(topomux ring 3 -b hardware --fpgas-per-node 3)
 # From topology file
 topomux -f topologies/xilinx_ring.topo -b hardware --fpgas-per-node 3
 
-# Emulation FIFOs + symlinks (plain layout)
+# Emulation: prints mkdir/mkfifo/ln-s commands. Pipe to bash to apply.
 topomux ring 4 -b emulation --base-dir /tmp/pipes
+topomux ring 4 -b emulation --base-dir /tmp/pipes | bash
 
-# Emulation with a BSP overlay (adds symlinks according BSP's id layout)
-topomux reverse-ring 4 -b emulation --bsp <name> --base-dir /tmp/pipes
-
-# Dry run (print actions without creating files)
-topomux ring 4 -b emulation --dry-run
+# Emulation with a BSP overlay (adds symlinks according to BSP's id layout)
+topomux reverse-ring 4 -b emulation --bsp <name> --base-dir /tmp/pipes | bash
 
 # FPGA-Link GUI URL
 topomux ring 3 -b hardware --gui-url
@@ -78,21 +76,23 @@ g = topomux.from_edge_list([
     ((2, 0), (0, 1)),
 ])
 
-# Hardware output
+# Hardware output (returns list of --fpgalink=... strings)
 hw = topomux.HardwareBackend(topomux.NodeMapping(fpgas_per_node=3))
-print(hw.emit_command(g))
+print(" ".join(hw.emit(g)))
 print(hw.emit_gui_url(g))
 
-# Emulation output (plain)
+# Emulation output (returns list of mkdir/mkfifo/ln-s commands)
 emu = topomux.EmulationBackend(base_dir="/tmp/pipes")
-emu.emit(g, dry_run=True)
+for action in emu.emit(g):
+    print(action)
 
 # Emulation output (with BSP overlay)
 emu = topomux.EmulationBackend(
     base_dir="/tmp/pipes",
     bsp=topomux.BittwareS10BSP(),
 )
-emu.emit(g)
+for action in emu.emit(g):
+    print(action)
 ```
 
 ## Topology File Format

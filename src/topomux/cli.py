@@ -71,11 +71,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("."),
         help="Base directory for emulation links",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print actions without creating files",
-    )
 
     # Hardware options
     parser.add_argument(
@@ -126,8 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.backend == "emulation":
         bsp = BSP_REGISTRY[args.bsp]() if args.bsp else None
         backend = EmulationBackend(base_dir=args.base_dir, bsp=bsp)
-        actions = backend.emit(graph, dry_run=args.dry_run)
-        for action in actions:
+        for action in backend.emit(graph):
             print(action)
 
     return 0
